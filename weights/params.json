@@ -1,0 +1,1 @@
+{"method": "cc", "thr": 0.6, "min_area": 400, "aux_thr": 0.5, "tta": true}
