@@ -7,7 +7,12 @@ from common import ROOT, RAW, load_image, panoptic_quality
 from predict import extract_instances
 
 names = sys.argv[1:]  # cache sub-directories to average, e.g. resnet34d_f0_tta effb3d_f0_tta
-ev = json.load(open(f"{ROOT}/runs/evaluation.json"))["ensemble" if len(names) > 1 else names[0]]
+if not names:
+    sys.exit("usage: make_report_figures.py <evalcache subdir> [<evalcache subdir> ...]")
+evaluation = json.load(open(f"{ROOT}/runs/evaluation.json"))
+key = "ensemble" if len(names) > 1 else names[0].removesuffix("_tta")  # evaluation.json keys carry no _tta suffix
+ev = evaluation[key]
+os.makedirs(f"{ROOT}/report/figures", exist_ok=True)
 splits = pd.read_csv(f"{ROOT}/data/splits.csv"); va = splits[splits.fold == 0].stem.tolist()
 images_df = pd.DataFrame(json.load(open(f"{RAW}/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json"))["images"])
 preds = {s: np.mean([np.load(f"{ROOT}/runs/evalcache/{n}/{s}.npy") for n in names], 0).astype(np.float32) / 255 for s in va}

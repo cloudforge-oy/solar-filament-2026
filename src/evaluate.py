@@ -10,12 +10,16 @@ from common import ROOT, RAW, load_image, panoptic_quality
 from predict import load_models, predict_prob, extract_instances
 
 
-def cached_pred(model_path, stem, device, tta, cache_dir):
-    f = f"{cache_dir}/{stem}.npy"
-    if not os.path.exists(f):
-        m = load_models([model_path], device)
-        np.save(f, (predict_prob(m, load_image(f"{RAW}/train/train_images/{stem}.jpeg"), device, tta) * 255).round().astype(np.uint8))
-    return np.load(f).astype(np.float32) / 255
+def cached_preds(model_path, stems, device, tta, cache_dir):
+    """Predict (3, H, W) maps for all stems with one model, caching them as uint8 .npy files."""
+    missing = [s for s in stems if not os.path.exists(f"{cache_dir}/{s}.npy")]
+    if missing:
+        models = load_models([model_path], device)
+        for s in missing:
+            out = predict_prob(models, load_image(f"{RAW}/train/train_images/{s}.jpeg"), device, tta)
+            np.save(f"{cache_dir}/{s}.npy", (out * 255).round().astype(np.uint8))
+        del models; torch.cuda.empty_cache()
+    return {s: np.load(f"{cache_dir}/{s}.npy").astype(np.float32) / 255 for s in stems}
 
 
 def score(preds, gts, softs, method, thr, min_area, aux, rng=None, n_boot=0):
@@ -56,8 +60,7 @@ def main():
     preds = {}
     for w, n in zip(args.weights, names):
         d = f"{args.cache}/{n}{'_tta' if args.tta else ''}"; os.makedirs(d, exist_ok=True)
-        preds[n] = {s: cached_pred(w, s, device, args.tta, d) for s in va}
-        torch.cuda.empty_cache()
+        preds[n] = cached_preds(w, va, device, args.tta, d)
     if len(names) > 1:
         preds["ensemble"] = {s: np.mean([preds[n][s] for n in names], 0) for s in va}
     rng = np.random.RandomState(0)

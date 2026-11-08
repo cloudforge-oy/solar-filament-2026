@@ -5,6 +5,7 @@
 #        scripts/train_folds.sh efficientnet-b3 effb3d "1 2 3 4" --epochs 50 --crop 640 --bs 6 --eval_every 10
 set -e
 cd "$(dirname "$0")/.."
+mkdir -p runs
 PY=${PYTHON:-python3}
 enc=$1; tag=$2; folds=$3; shift 3
 for f in $folds; do

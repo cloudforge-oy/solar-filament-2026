@@ -1,4 +1,5 @@
 """Draw the pipeline diagram for the report (report/figures/pipeline.pdf)."""
+import os
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
@@ -31,4 +32,6 @@ for a, b in zip(xs[:-1], xs[1:]):
     arrow(ax, a + 1.75, 0.65, b, 0.65)
 arrow(ax, 8.95, 1.75, 2.95, 1.15)  # trained weights to inference
 ax.text(6.0, 1.47, "trained weights", fontsize=7, ha="center", style="italic")
-fig.savefig("report/figures/pipeline.pdf", bbox_inches="tight"); print("saved report/figures/pipeline.pdf")
+out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "report", "figures", "pipeline.pdf")
+os.makedirs(os.path.dirname(out), exist_ok=True)
+fig.savefig(out, bbox_inches="tight"); print("saved", os.path.relpath(out))
