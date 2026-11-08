@@ -1,0 +1,13 @@
+data/
+runs/
+submission*.csv
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+notebooks/*.html
+report/*.aux
+report/*.log
+report/*.out
+report/*.bbl
+report/*.blg
+report/*.synctex.gz
