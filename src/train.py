@@ -100,6 +100,7 @@ def main():
     args = ap.parse_args()
     out = args.out or f"{ROOT}/runs/{args.encoder}_f{args.fold}"
     os.makedirs(out, exist_ok=True)
+    json.dump(vars(args), open(f"{out}/config.json", "w"), indent=1)
     torch.manual_seed(0); np.random.seed(0)
     device = "cuda"
     splits = pd.read_csv(f"{ROOT}/data/splits.csv")
@@ -121,8 +122,8 @@ def main():
         for x, y in dl:
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.float16):
-                out = model(x)
-                seg, dist, touch = out[:, :1].float(), out[:, 1:2].float(), out[:, 2:].float()
+                pred = model(x)
+                seg, dist, touch = pred[:, :1].float(), pred[:, 1:2].float(), pred[:, 2:].float()
                 loss = bce(seg, y[:, :1]) + soft_dice_loss(seg, y[:, :1]) \
                     + 5.0 * F.mse_loss(torch.sigmoid(dist), y[:, 1:2]) \
                     + 0.5 * touch_bce(touch, y[:, 2:])

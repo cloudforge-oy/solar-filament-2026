@@ -11,10 +11,17 @@ from train import predict_full
 
 
 def load_models(paths, device):
+    """Load checkpoints. A checkpoint is either a dict {"encoder": str, "state_dict": ...} (exported weights)
+    or a bare state dict, in which case the encoder name is read from config.json next to it."""
+    import json
     models = []
     for p in paths:
-        enc = os.path.basename(os.path.dirname(p)).split("_f")[0]
-        m = build_model(enc, weights=None); m.load_state_dict(torch.load(p, map_location=device)); m.to(device).eval()
+        ck = torch.load(p, map_location=device)
+        if isinstance(ck, dict) and "state_dict" in ck:
+            enc, sd = ck["encoder"], ck["state_dict"]
+        else:
+            enc = json.load(open(os.path.join(os.path.dirname(p), "config.json")))["encoder"]; sd = ck
+        m = build_model(enc, weights=None); m.load_state_dict(sd); m.to(device).eval()
         models.append(m)
     return models
 

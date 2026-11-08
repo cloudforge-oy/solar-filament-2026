@@ -1,0 +1,138 @@
+% =============================================================================
+% Report for the Solar Filament Segmentation Challenge 2026 (Kaggle).
+% Based on the organizers' Overleaf template (acmart, sigconf). Template packages
+% live in preamble.tex; citations live in main.bib.
+% =============================================================================
+
+\documentclass[sigconf]{acmart}
+\input{preamble}
+
+% Guide styling: \guideStyletrue = show gray italic hints; \guideStylefalse = omit them
+\guideStylefalse
+
+\newcommand{\TBD}[1]{\textbf{\color{red}[TBD: #1]}}
+
+\begin{document}
+
+\title{Consensus-Supervised U-Net Ensemble with Contact-Line Splitting for Solar Filament Instance Segmentation}
+\subtitle{A Solution to the Solar Filament Segmentation Challenge 2026} % DO NOT CHANGE
+
+\author{Tatu Helander}
+\affiliation{%
+\institution{Cloudforge Oy}
+\city{\TBD{City}}
+\country{Finland}
+}
+\email{tatu.helander@gmail.com}
+
+\begin{abstract}
+This report describes our solution to the Solar Filament Segmentation Challenge~2026, a Kaggle competition on automatic segmentation of solar filaments in GONG H-$\alpha$ observations. We train U-Nets with ImageNet-pretrained ResNet34 and EfficientNet-B3 encoders on native-resolution crops of the 2048$\times$2048 images, supervising them with \emph{soft consensus} masks that encode the fraction of annotators who marked each pixel, together with a normalised distance-to-boundary map and a map of the contact lines between touching filaments. At inference the probability maps of the ensemble are averaged over flip test-time augmentation, thresholded, and converted into pixel-disjoint instances by connected-component labelling, with components cut along predicted contact lines. Post-processing parameters are tuned on a date-grouped validation fold against the Panoptic Quality (PQ) metric computed against every annotator set independently. On the validation fold the ensemble reaches a PQ of \TBD{val PQ} and on the public Kaggle leaderboard \TBD{LB PQ}. The code, trained weights and a notebook reproducing the predictions are publicly available.\footnote{\url{https://github.com/cloudforge-oy/solar-filament-2026}}
+\end{abstract}
+
+\maketitle
+
+% ==================================== %
+% INTRODUCTION %
+% ==================================== %
+\section{Introduction}
+This report goes over the details of our submitted solution to the Solar Filament Segmentation Challenge~2026 \cite{filament-segmentation-2026}. The challenge, launched on July~10,~2026, is organized by the Earth-Space AI Research (ESAIR) Lab\footnote{\href{https://www.esairlab.com/home}{www.esairlab.com/}}. This challenge utilizes the MAGFiLO dataset for evaluation of the segmentation algorithms \cite{ahmadzadeh2024dataset}.
+
+The task is \emph{instance} segmentation evaluated with Panoptic Quality \cite{kirillov2019panoptic}: every predicted filament counts either as a true positive (IoU~$>0.5$ with one ground-truth filament), or as a false positive, and each pixel may belong to at most one prediction. Three properties of the data shaped our design. First, the 707 training images carry 1154 annotation sets, because 296 images were annotated independently by two or three annotators who disagree noticeably on filament extent and on faint filaments. Second, filaments are small and thin (median area 1228~px, median bounding box $\approx$75$\times$70~px in a 2048$\times$2048 frame), so down-sampling destroys the barbs the organizers care about. Third, only 0.9\% of the 8199 annotated filaments touch another filament within 3~px, so the instance problem is almost entirely a \emph{semantic} segmentation problem followed by connected-component labelling, with a small residual need to split touching pairs. We therefore built a deliberately simple, fully reproducible pipeline around a semantic U-Net \cite{ronneberger2015unet} and concentrated our effort on supervision, validation methodology and PQ-aware post-processing.
+
+% ==================================== %
+% METHODOLOGY %
+% ==================================== %
+\section{Methodology}\label{sec:methodology}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/pipeline.pdf}
+\caption{End-to-end pipeline. Training (top): COCO polygons of all annotator sets are rasterised into instance maps and reduced to three consensus targets per image; U-Nets are trained on random native-resolution crops. Inference (bottom): full-frame prediction with flip TTA, ensemble averaging, thresholding, connected components cut at predicted contact lines, minimum-area filtering, COCO RLE encoding.}
+\label{fig:pipeline}
+\end{figure*}
+
+\subsection{Data preparation and targets}
+Images are read as single-channel 8-bit grayscale and scaled to $[0,1]$; no other pre-processing (no limb-darkening correction, no disk masking) is applied. For every annotation set, the single-polygon segmentations are rasterised with \texttt{pycocotools} into a 2048$\times$2048 instance map. The $k$ annotation sets of one image are then reduced to three \emph{consensus} targets that are shared by all annotators of that image:
+\begin{enumerate}
+\item the soft filament mask $y_{\mathrm{seg}} \in [0,1]$, the fraction of annotators who marked the pixel. Training on this soft label rather than on one arbitrary annotator (or on the union) makes the network predict the \emph{expected} annotation, which is the right target when the hidden test ground truth also consists of several annotator sets;
+\item a normalised distance-to-boundary map $y_{\mathrm{dist}}$, computed per instance as the Euclidean distance transform divided by the instance maximum, averaged over annotators;
+\item a contact-line map $y_{\mathrm{touch}}$: pixels within 2~px of two different instances of the same annotation set, averaged over annotators.
+\end{enumerate}
+The distance map was intended for a marker-based watershed \cite{beucher1993watershed}. On ground-truth maps, however, watershed over-segments elongated filaments, whose normalised distance has several maxima along the spine (oracle PQ 0.75 versus 0.79 for plain connected components on the same consensus masks), so we kept the head for analysis but based the instance split on the contact-line map, which is non-zero only where two filaments actually meet.
+
+\subsection{Model}
+We use the U-Net implementation of \texttt{segmentation\_models\_pytorch} \cite{iakubovskii2019smp} with ImageNet-pretrained encoders, the first convolution adapted to one input channel, and three output channels (filament logit, distance logit, contact logit). Two encoders are trained: ResNet34 \cite{he2016resnet} (24.4~M parameters) and EfficientNet-B3 \cite{tan2019efficientnet} (13.2~M parameters). The loss is
+\[
+\mathcal{L} = \mathrm{BCE}(\hat y_{\mathrm{seg}}, y_{\mathrm{seg}}) + \mathrm{Dice}(\hat y_{\mathrm{seg}}, y_{\mathrm{seg}}) + 5\,\mathrm{MSE}(\hat y_{\mathrm{dist}}, y_{\mathrm{dist}}) + 0.5\,\mathrm{BCE}_{w=20}(\hat y_{\mathrm{touch}}, y_{\mathrm{touch}}),
+\]
+where both BCE terms accept soft targets and the contact term uses a positive-class weight of 20 because contact pixels are extremely rare.
+
+\subsection{Sampling and training}
+Networks are trained on random crops at native resolution (512$\times$512 for ResNet34, 640$\times$640 for EfficientNet-B3), four crops per image per epoch; with probability 0.7 the crop is centred near a filament pixel of the consensus mask, otherwise it is placed uniformly at random (so that empty sky, limb and off-disk corners are seen). Augmentations are horizontal/vertical flips, 90$^\circ$ rotations, random gamma ($e^{\pm0.3}$), contrast ($\pm15\%$), brightness ($\pm0.05$) and Gaussian noise ($\sigma\le0.02$). We use AdamW (weight decay $10^{-4}$), a one-cycle learning-rate schedule peaking at $3\cdot10^{-4}$, mixed precision, batch size 8 (ResNet34, 40 epochs) or 6 (EfficientNet-B3, 50 epochs). One ResNet34 run takes about 45~minutes on a laptop RTX~5060 (8~GB).
+
+\paragraph{Validation split.} The 707 images are grouped by observation date and the dates are assigned to five folds, so that the same day observed by two GONG stations, or the same image annotated by three annotators, never straddles the training/validation boundary. All numbers in Section~\ref{sec:evaluation} are computed on fold~0 (140 images, 232 annotation sets) by models that never saw it. The final models are those validated on fold~0; \TBD{if more folds are trained on the 4080, describe the fold ensemble here}.
+
+\subsection{Inference and post-processing}
+Each test image is processed as a whole 2048$\times$2048 frame (0.4~s per forward pass in fp16). Predictions are averaged over the identity and three flips (TTA) and over the models of the ensemble. Instances are then extracted as follows: (i) threshold the filament probability at $\tau$; (ii) remove pixels whose contact probability exceeds $\tau_c$; (iii) label 8-connected components; (iv) give the removed contact pixels back to the adjacent component by a flat watershed restricted to the mask; (v) drop components smaller than $A_{\min}$ pixels; (vi) encode each component as a COCO RLE string. Because components are disjoint by construction, no two predictions of an image overlap, which the PQ scorer requires. $\tau$, $\tau_c$ and $A_{\min}$ are chosen by a grid search that maximises validation PQ (Section~\ref{sec:evaluation}); the minimum area turned out to be the most important knob, because PQ charges 0.5 for every false positive and the probability maps contain many small spurious dark blobs.
+
+% ==================================== %
+% EVALUATION %
+% ==================================== %
+\section{Evaluation}\label{sec:evaluation}
+
+\subsection{Strategy}
+We re-implemented PQ exactly as defined by the organizers: predicted and ground-truth instances are matched by IoU~$>0.5$ (unique by construction), $\mathrm{PQ}=\sum_{TP}\mathrm{IoU}/(|TP|+\tfrac12|FP|+\tfrac12|FN|)$, computed per image \emph{and per annotation set} (an image annotated by three people yields three PQ values) and averaged. Scoring against each annotator separately rather than against a merged mask keeps the validation faithful to the hidden test protocol, and the spread between annotators of the same image gives a direct estimate of the ceiling imposed by label noise. We also report the pixel Dice of the consensus mask (threshold 0.5). Uncertainty is given as the standard error of the mean over annotation sets and as 95\% bootstrap intervals over images.
+
+\subsection{Results}
+\TBD{Table: single models vs ensemble, CC vs contact-line split, with/without TTA; PQ $\pm$ SE, Dice, TP/FP/FN counts; public LB score.}
+
+\begin{table}[h]
+\caption{Validation (fold 0, 232 annotation sets) and public leaderboard results. PQ is the mean over annotation sets $\pm$ standard error.}
+\label{tab:results}
+\begin{tabular}{lcccc}
+\toprule
+Model & Post-proc. & Dice & PQ (val) & PQ (LB) \\
+\midrule
+ResNet34 (1-ch, first submission) & CC, $\tau{=}0.6$, $A_{\min}{=}400$ & 0.655 & $0.385$ & 0.33 \\
+ResNet34 (3-ch) & \TBD{} & \TBD{} & \TBD{} & -- \\
+EfficientNet-B3 (3-ch) & \TBD{} & \TBD{} & \TBD{} & -- \\
+Ensemble & \TBD{} & \TBD{} & \TBD{} & \TBD{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{figures/sweep.pdf}
+\caption{Validation PQ as a function of the probability threshold $\tau$ and minimum instance area $A_{\min}$ for the ensemble. \TBD{generate}}
+\label{fig:sweep}
+\end{figure}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/examples.pdf}
+\caption{Examples on validation images: H-$\alpha$ crop, ground truth of one annotator, and ensemble prediction (true positives green, false positives red, false negatives blue). \TBD{generate}}
+\label{fig:examples}
+\end{figure*}
+
+\subsection{Discussion}
+\paragraph{Strengths.} The pipeline is small (two encoders, $<$40~M parameters in total), trains in a few GPU-hours on a laptop, runs at $\approx$1.5~s per full-resolution image including TTA, has no learned instance machinery that could produce overlapping masks, and every design choice is justified by a measured validation number. Consensus supervision makes the probability map an estimate of annotator agreement, which is directly interpretable: faint filaments annotated by one of three annotators receive $p\approx1/3$ and are correctly dropped at $\tau\ge0.5$.
+
+\paragraph{Weaknesses.} \TBD{update with final numbers} False positives dominate the error budget (FP $\approx$ TP on the validation fold): small dark features (sunspot penumbrae, dark fibrils, plage boundaries, seeing artefacts) are confused with short filaments, and many of them are counted as FP against one annotator while being TP against another. The gap between our validation PQ (0.385) and the public leaderboard (0.33) of the first submission suggests that the public test images are either harder or scored with a different aggregation (e.g. dataset-level rather than per-image). Connected components cannot split filaments that genuinely touch; the contact-line head is trained on only $\approx$70 touching pairs and its effect is \TBD{quantify}.
+
+\paragraph{Possible improvements.} Training on all five folds and ensembling (we had time for \TBD{n} folds), a larger input context for faint, fragmented filaments (e.g. a lower-resolution auxiliary branch), explicit modelling of each annotator as a separate output head, learned FP rejection with a small classifier on component-level features (area, mean darkness contrast, elongation, distance to the limb), and spine-aware merging of fragments that belong to one filament.
+
+% ==================================== %
+% ACKNOWLEDGMENT %
+% ==================================== %
+\section{Acknowledgment}
+The organization of the Filament Segmentation Challenge 2026 is partially supported by the U.S. National Science Foundation (NSF) under Grant No. 2209912 and 2433781, directorate for Computer and Information Science and Engineering (CSE), and Office of Advanced Cyberinfrastructure (OAC), and Grant No. 2511630, AST Division Of Astronomical Sciences and MPS Directorate for Mathematical and Physical Sciences.
+
+The Filament Segmentation Challenge 2026 is sponsored by the U.S. National Science Foundation (NSF) National Solar Observatory (NSO).
+
+This work utilizes GONG data obtained by the NSO Integrated Synoptic Program, managed by the National Solar Observatory, which is operated by the Association of Universities for Research in Astronomy (AURA), Inc. under a cooperative agreement with the National Science Foundation and with contribution from the National Oceanic and Atmospheric Administration. The GONG network of instruments is hosted by the Big Bear Solar Observatory, High Altitude Observatory, Learmonth Solar Observatory, Udaipur Solar Observatory, Instituto de Astrofísica de Canarias, and Cerro Tololo Interamerican Observatory.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{main}
+
+\end{document}
