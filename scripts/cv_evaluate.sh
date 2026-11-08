@@ -1,7 +1,7 @@
 #!/bin/bash
 # Out-of-fold evaluation: for every fold, evaluate the models trained without that fold on it.
 # usage: scripts/cv_evaluate.sh "<tags>" e.g. scripts/cv_evaluate.sh "resnet34d effb3d"
-set -e
+set -eo pipefail
 cd "$(dirname "$0")/.."
 PY=${PYTHON:-python3}
 tags=$1
