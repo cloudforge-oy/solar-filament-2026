@@ -5,8 +5,9 @@ cross-validation fold (`effb3d_f<k>.pt` was trained on all folds except `k`). Ea
 `{"encoder": "efficientnet-b3", "state_dict": ...}` and is loaded by `src/predict.py:load_models`.
 All five are averaged (together with flip test-time augmentation) at inference.
 
-`params.json` records the post-processing used for the submitted CSV: connected components of the
-averaged filament probability above `thr`, components smaller than `min_area` pixels dropped.
+`decision_scorer.pkl` holds the decision-layer scorer (two scikit-learn 1.9.1 HistGradientBoosting models, the
+feature list and the out-of-fold tau curve), fitted on all 119,802 out-of-fold candidates. `params.json` records
+the settings of the submitted CSV (`src/decision.py predict ... --tau 0.26`).
 
 Training command (per fold, see `scripts/train_folds.sh`):
 ```

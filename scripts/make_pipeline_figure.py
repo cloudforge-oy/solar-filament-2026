@@ -22,9 +22,9 @@ for x, t, c in zip(xs, tx, tr):
     box(ax, x, 1.75, 1.75, 1.0, t, c)
 for a, b in zip(xs[:-1], xs[1:]):
     arrow(ax, a + 1.75, 2.25, b, 2.25)
-inf = ["H-α test image\n2048×2048\ngrayscale", "Full-frame forward\n+ flip TTA,\nensemble average",
-       "Threshold τ;\ncut at predicted\ncontact lines", "8-connected\ncomponents,\ndrop area < A_min",
-       "COCO RLE per\ninstance →\nsubmission.csv"]
+inf = ["H-α test image\n2048×2048\ngrayscale", "Full-frame forward\n+ flip TTA,\n5-fold average",
+       "Component tree:\n16 threshold levels,\nclosing + hole fill", "GBM scorer û = ĥ·m̂,\nexact tree DP\nmax Σ(û − τ)",
+       "COCO RLE per\nselected node →\nsubmission.csv"]
 ic = ["#dbe9f6", "#fbe7c6", "#f6d8d8", "#f6d8d8", "#e8e8e8"]
 for x, t, c in zip(xs, inf, ic):
     box(ax, x, 0.15, 1.75, 1.0, t, c)

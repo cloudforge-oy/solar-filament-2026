@@ -1,1 +1,13 @@
-{"method": "cc", "thr": 0.6, "min_area": 400, "aux_thr": 0.5, "tta": true}
+{
+ "maps": "mean of the five EfficientNet-B3 fold models, flip TTA (src/predict_maps.py test)",
+ "method": "decision",
+ "tau": 0.26,
+ "scorer": "weights/decision_scorer.pkl",
+ "levels": "0.05..0.80 step 0.05",
+ "min_node_area": 100,
+ "fallback_rule": {
+  "method": "cc",
+  "thr": 0.6,
+  "min_area": 400
+ }
+}
