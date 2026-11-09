@@ -14,13 +14,16 @@ for key in ["resnet34d", "effb3d", "ensemble"]:
     if key not in rows: continue
     v = rows[key]; n = sum(r["n_sets"] for r in v.values())
     pooled = sum(r["pq"] * r["n_sets"] for r in v.values()) / n
-    per_set = np.array([r["pq_se"] ** 2 * r["n_sets"] * (r["n_sets"] - 1) for r in v.values()])  # sum of squared deviations
-    se = float(np.sqrt(per_set.sum() / n / (n - 1)))
+    # pooled SE over all annotation sets: within-fold sums of squares (from each fold's SE) + between-fold term
+    ss_within = sum(r["pq_se"] ** 2 * r["n_sets"] * (r["n_sets"] - 1) for r in v.values())
+    ss_between = sum(r["n_sets"] * (r["pq"] - pooled) ** 2 for r in v.values())
+    se = float(np.sqrt((ss_within + ss_between) / n / (n - 1)))
     cells = " & ".join(f"{v[k]['pq']:.3f}" if k in v else "--" for k in folds)
     tp, fp, fn = (sum(r[k] for r in v.values()) for k in ("tp", "fp", "fn"))
-    dice = np.mean([r["dice"] for r in v.values()])
+    dice = sum(r["dice"] * r["n_sets"] for r in v.values()) / n  # per-image pixel Dice, folds weighted by size
     lines.append(f"{label[key]} & {cells} & ${pooled:.3f} \\pm {se:.3f}$ & {dice:.3f} & {tp} / {fp} / {fn} \\\\")
 lines += [r"\bottomrule", r"\end{tabular}"]
+os.makedirs(f"{ROOT}/report", exist_ok=True)
 open(f"{ROOT}/report/results_table.tex", "w").write("\n".join(lines) + "\n")
 print("\n".join(lines))
 json.dump({k: {str(f): {"pq": r["pq"], "thr": r["thr"], "min_area": r["min_area"]} for f, r in v.items()} for k, v in rows.items()},
