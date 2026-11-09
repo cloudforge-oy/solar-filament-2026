@@ -89,7 +89,7 @@ def process_image(stem, maps_path, img_path, gt_paths=(), keep_labels=False):
     disk = (xx - DISK_CX) ** 2 + (yy - DISK_CY) ** 2 < (0.98 * DISK_R) ** 2
     gts = [cv2.imread(g, cv2.IMREAD_UNCHANGED).astype(np.int64) for g in gt_paths]
     n_gt = [int(g.max()) for g in gts]
-    station = STATIONS.index(stem[-2:]) if stem[-2:] in STATIONS else -1
+    station = float(STATIONS.index(stem[-2:])) if stem[-2:] in STATIONS else np.nan   # NaN = unknown category
 
     # baseline: the rule of our earlier submissions
     n, lab, st, _ = cv2.connectedComponentsWithStats((p > 0.6).astype(np.uint8), connectivity=8)
@@ -242,8 +242,10 @@ def cmd_bank(a):
         ids = images[images.file_name == s + ".jpeg"].id.tolist()
         jobs.append((s, f"{a.maps}/{s}.npy", f"{RAW}/train/train_images/{s}.jpeg",
                      [f"{ROOT}/data/masks/inst/{i}.png" for i in ids]))
+    fold_of = splits.set_index("stem").fold
+    jobs = [j for j in jobs if fold_of[j[0]] in a.folds]
     if a.limit:
-        jobs = [j for j in jobs if splits.set_index("stem").fold[j[0]] in a.folds][: a.limit]
+        jobs = jobs[: a.limit]
     t0, bank = time.time(), []
     with Pool(a.workers) as pool:
         for i, r in enumerate(pool.imap_unordered(_bank_job, jobs, chunksize=2)):
