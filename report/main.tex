@@ -26,7 +26,7 @@
 \email{tatu.helander@gmail.com}
 
 \begin{abstract}
-This report describes our solution to the Solar Filament Segmentation Challenge~2026, a Kaggle competition on automatic segmentation of solar filaments in GONG H-$\alpha$ observations. We train U-Nets with an ImageNet-pretrained EfficientNet-B3 encoder on native-resolution crops of the 2048$\times$2048 images, supervising them with \emph{soft consensus} masks that encode the fraction of annotators who marked each pixel, together with two auxiliary targets (a normalised distance-to-boundary map and the contact lines between touching filaments). Five models, one per date-grouped cross-validation fold, are averaged at inference together with flip test-time augmentation; the averaged probability is thresholded and converted into pixel-disjoint instances by connected-component labelling with a minimum-area filter. Post-processing parameters are chosen on out-of-fold predictions against the Panoptic Quality (PQ) metric computed against every annotator set independently. In five-fold cross-validation a single model reaches a PQ of \TBD{CV PQ} $\pm$ \TBD{SE}; the five-model ensemble scores \TBD{LB PQ} on the public Kaggle leaderboard. A ResNet34 variant, a distance-map watershed, contact-line splitting and confidence filtering of components were evaluated and rejected because they did not improve PQ. The code, trained weights and a notebook reproducing the predictions are publicly available.\footnote{\url{https://github.com/cloudforge-oy/solar-filament-2026}}
+This report describes our solution to the Solar Filament Segmentation Challenge~2026, a Kaggle competition on automatic segmentation of solar filaments in GONG H-$\alpha$ observations. We train U-Nets with an ImageNet-pretrained EfficientNet-B3 encoder on native-resolution crops of the 2048$\times$2048 images, supervising them with \emph{soft consensus} masks that encode the fraction of annotators who marked each pixel, together with two auxiliary targets (a normalised distance-to-boundary map and the contact lines between touching filaments). Five models, one per date-grouped cross-validation fold, are averaged at inference together with flip test-time augmentation; the averaged probability is thresholded and converted into pixel-disjoint instances by connected-component labelling with a minimum-area filter. Post-processing parameters are chosen on out-of-fold predictions against the Panoptic Quality (PQ) metric computed against every annotator set independently. In five-fold cross-validation a single model reaches an out-of-fold PQ of $0.404 \pm 0.004$ (1154 annotation sets); the five-model ensemble scores 0.35 on the public Kaggle leaderboard. A ResNet34 variant, a distance-map watershed, contact-line splitting and confidence filtering of components were evaluated and rejected because they did not improve PQ. The code, trained weights and a notebook reproducing the predictions are publicly available.\footnote{\url{https://github.com/cloudforge-oy/solar-filament-2026}}
 \end{abstract}
 
 \maketitle
@@ -62,9 +62,10 @@ The two auxiliary targets were meant to separate touching filaments. The distanc
 
 \subsection{Model}
 We use the U-Net implementation of \texttt{segmentation\_models\_pytorch} \cite{iakubovskii2019smp} with ImageNet-pretrained encoders, the first convolution adapted to one input channel, and three output channels (filament logit, distance logit, contact logit). Two encoders were compared: ResNet34 \cite{he2016resnet} (24.4~M parameters) and EfficientNet-B3 \cite{tan2019efficientnet} (13.2~M parameters); the final submission uses EfficientNet-B3 only. The loss is
-\[
-\mathcal{L} = \mathrm{BCE}(\hat y_{\mathrm{seg}}, y_{\mathrm{seg}}) + \mathrm{Dice}(\hat y_{\mathrm{seg}}, y_{\mathrm{seg}}) + 5\,\mathrm{MSE}(\hat y_{\mathrm{dist}}, y_{\mathrm{dist}}) + 0.5\,\mathrm{BCE}_{w=20}(\hat y_{\mathrm{touch}}, y_{\mathrm{touch}}),
-\]
+\begin{align*}
+\mathcal{L} ={}& \mathrm{BCE}(\hat y_{\mathrm{seg}}, y_{\mathrm{seg}}) + \mathrm{Dice}(\hat y_{\mathrm{seg}}, y_{\mathrm{seg}}) \\
+ &+ 5\,\mathrm{MSE}(\hat y_{\mathrm{dist}}, y_{\mathrm{dist}}) + 0.5\,\mathrm{BCE}_{w=20}(\hat y_{\mathrm{touch}}, y_{\mathrm{touch}}),
+\end{align*}
 where both BCE terms accept soft targets and the contact term uses a positive-class weight of 20 because contact pixels are extremely rare.
 
 \subsection{Sampling and training}
@@ -86,12 +87,12 @@ We re-implemented PQ exactly as defined by the organizers: predicted and ground-
 \subsection{Results}
 Table~\ref{tab:results} gives the out-of-fold PQ of every configuration, fold by fold and pooled over all 1154 annotation sets. Post-processing ($\tau$, $A_{\min}$) is re-optimised per fold on a grid ($\tau\in\{0.4,\dots,0.7\}$, $A_{\min}\in\{250,400,550\}$); the chosen values move within $\tau\in[0.4,0.7]$, $A_{\min}\in\{400,550\}$ and the PQ surface is flat there (Figure~\ref{fig:sweep}), so the fixed setting $\tau=0.6$, $A_{\min}=400$ was used for the submission. The contact-line cut (any $\tau_c$) and the distance-map watershed never exceeded plain connected components on any fold, and rejecting components by their peak or mean probability changed PQ by less than $0.002$, so both were disabled. EfficientNet-B3 beats ResNet34 by $0.02$--$0.03$ PQ on every fold, and averaging the two encoders is no better than EfficientNet-B3 alone, so the submitted ensemble consists of the five EfficientNet-B3 fold models only.
 
-\begin{table}[h]
-\caption{Out-of-fold Panoptic Quality (mean over annotation sets) per fold and pooled ($\pm$ standard error), consensus-mask Dice, and matched counts summed over all folds. All models use flip TTA.}
+\begin{table*}[t]
+\caption{Out-of-fold Panoptic Quality (mean over annotation sets) per fold and pooled over all 1154 annotation sets ($\pm$ standard error), consensus-mask pixel Dice, and matched instance counts summed over all folds. All models use flip TTA; post-processing is re-optimised per fold.}
 \label{tab:results}
-\small
+\centering\small
 \input{results_table}
-\end{table}
+\end{table*}
 
 On the public Kaggle leaderboard (about half of the 180 test images) the submissions scored: single-channel ResNet34 baseline 0.33; EfficientNet-B3 fold-0 model 0.35; five-fold EfficientNet-B3 ensemble 0.35 (both $\tau=0.6/A_{\min}=400$ and $\tau=0.5/A_{\min}=500$). The leaderboard is reported with two decimals, so the small differences visible in cross-validation are below its resolution; the roughly $0.06$ gap between cross-validation and leaderboard PQ is constant across models and is discussed below.
 
@@ -104,7 +105,7 @@ On the public Kaggle leaderboard (about half of the 180 test images) the submiss
 
 \begin{figure*}[t]
 \centering
-\includegraphics[width=\textwidth]{figures/examples.pdf}
+\includegraphics[height=0.5\textheight]{figures/examples.pdf}
 \caption{Validation images at the 25th, 50th and 75th percentile of per-image PQ (EfficientNet-B3 fold~0, out-of-fold). Left: H-$\alpha$ crop; middle: one annotator's ground truth; right: prediction with true positives in green, false positives in red and missed filaments in blue.}
 \label{fig:examples}
 \end{figure*}
