@@ -16,8 +16,21 @@ def load_image(path):
     return im.astype(np.float32) / 255.0
 
 
-def normalize(x):
-    return (x - MEAN) / STD
+_yy, _xx = np.ogrid[:H, :W]
+DISK = (_yy - 1024.0) ** 2 + (_xx - 1023.5) ** 2 <= 880.0 ** 2   # safely inside the solar disk (radius ~900 px)
+
+
+def norm_stats(img, norm="fixed"):
+    """(mean, std) used to standardise a full image: dataset constants ("fixed", the first model generation)
+    or the image's own statistics inside the solar disk ("disk"), which removes station/exposure differences."""
+    if norm == "disk":
+        v = img[DISK]
+        return float(v.mean()), max(float(v.std()), 1e-3)
+    return MEAN, STD
+
+
+def normalize(x, stats=(MEAN, STD)):
+    return (x - stats[0]) / stats[1]
 
 
 def build_model(encoder="resnet34", weights="imagenet", classes=3):

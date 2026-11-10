@@ -3,7 +3,7 @@
   oof : for every fold k, the fold-k model predicts the fold-k (held-out) training images
         -> <out>/<stem>.npy, uint8 (3, H, W) = 255 * [filament prob, distance, contact]
   test: the average of all given models on the test images -> <out>/<stem>.npy (same layout)
-Flip TTA is always on. Existing files are skipped, so the job is resumable.
+Test-time augmentation: --tta 4 (flips, default) or 8 (flips x rot90). Existing files are skipped, so the job is resumable.
 """
 import argparse, glob, os, re
 import numpy as np, pandas as pd, torch
@@ -14,15 +14,16 @@ from predict import load_models, predict_prob
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["oof", "test"])
-    ap.add_argument("--weights", nargs="+", required=True, help="oof: one checkpoint per fold, name must contain _f<k>")
+    ap.add_argument("--weights", nargs="+", required=True, help="oof: one checkpoint per fold; its path must contain _f<k>")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--tta", type=int, default=4, choices=[1, 4, 8], help="views: 4 = flips, 8 = flips x 90-degree rotation")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     jobs = []
     if a.mode == "oof":
         splits = pd.read_csv(f"{ROOT}/data/splits.csv")
         for w in a.weights:
-            k = int(re.search(r"_f(\d)", os.path.basename(w)).group(1))
+            k = int(re.findall(r"_f(\d+)", w)[-1])            # fold from the file or run-directory name
             stems = splits[splits.fold == k].stem.tolist()
             jobs.append(([w], [(s, f"{RAW}/train/train_images/{s}.jpeg") for s in stems]))
     else:
@@ -35,7 +36,7 @@ def main():
             continue
         models = load_models(weights, "cuda")
         for i, (s, p) in enumerate(todo):
-            out = predict_prob(models, load_image(p), "cuda", tta=True)
+            out = predict_prob(models, load_image(p), "cuda", tta=a.tta)
             np.save(f"{a.out}/{s}.npy.tmp.npy", (out * 255).round().astype(np.uint8))
             os.replace(f"{a.out}/{s}.npy.tmp.npy", f"{a.out}/{s}.npy")
             if (i + 1) % 25 == 0:

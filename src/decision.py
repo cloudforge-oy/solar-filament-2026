@@ -43,7 +43,21 @@ FEATURES = [
     "rho", "abs_lat", "n_children", "area_ratio_parent", "n_siblings", "parent_level_gap",
     "img_n_cc50", "img_fg50", "img_rel_std", "station",
 ]
+# second generation: more geometry, the position of a candidate in its tree, and its neighbourhood
+FEATURES += [
+    "x_rel", "y_rel", "log_width", "year",
+    "top_level", "span", "n_desc", "n_leaf", "chain", "up_chain", "ch_area", "ch_pm", "big_child",
+    "par_log_area", "par_pm", "root_log_area", "root_ratio", "depth", "sib_rank", "root_nleaf", "root_top",
+    "img_n_l1", "img_n_l6", "img_n_l11", "img_n_l15", "img_area_l6", "rank_area", "rank_pm",
+    "nn_dist", "n_near", "area_near",
+]
 CATEGORICAL = ["station"]
+NEAR_PX = 200.0                                           # neighbourhood radius for the same-level context features
+
+
+def feature_names(nodes):
+    """Descriptor columns used by the scorer: the fixed list plus one block per model family (fam*)."""
+    return FEATURES + sorted(c for c in nodes.columns if c.startswith("fam"))
 
 
 # ------------------------------------------------------------------------------------------------- tree building
@@ -76,12 +90,17 @@ def _iou_with_records(lab, n_lab, gts):
 def process_image(stem, maps_path, img_path, gt_paths=(), keep_labels=False):
     """Build the candidate forest of one image.
 
+    maps_path is one cached map file or a list of them (one per model family, always in the same order): the
+    forest is built on their mean, and every candidate also gets the mean probability of each family (fam* columns).
     Returns dict(nodes=DataFrame of descriptors + tree links, ious=(n_nodes, R) best IoU per record,
     n_gt=[|G_r|], baseline=per-record parts of the plain rule (CC of p > 0.6, area >= 400), labels=[uint16 maps])."""
     cv2.setNumThreads(1)
-    maps = np.load(maps_path)
+    fams = [np.load(q) for q in ([maps_path] if isinstance(maps_path, str) else list(maps_path))]
+    maps = fams[0] if len(fams) == 1 else np.mean(fams, 0)
     p = maps[0].astype(np.float32) / 255
     dist, touch = maps[1], maps[2]
+    fam_p = [f[0] for f in fams] if len(fams) > 1 else []
+    year = float(stem[:4]) + (float(stem[4:6]) - 0.5) / 12 if stem[:6].isdigit() else np.nan
     img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE).astype(np.float32)
     bg = cv2.GaussianBlur(img, (0, 0), 40)
     rel = img / np.maximum(bg, 1.0)                         # relative intensity; filaments are < 1
@@ -130,6 +149,7 @@ def process_image(stem, maps_path, img_path, gt_paths=(), keep_labels=False):
             pts = np.vstack(cnts)
             hull = cv2.contourArea(cv2.convexHull(pts))
             (_, _), (rw, rh), _ = cv2.minAreaRect(pts)
+            perim = sum(cv2.arcLength(c, True) for c in cnts)
             long_, short_ = max(rw, rh, 1.0), max(min(rw, rh), 1.0)
             cx, cy = cen[i]
             parent = -1
@@ -150,7 +170,10 @@ def process_image(stem, maps_path, img_path, gt_paths=(), keep_labels=False):
                 rel_mean=float(rv.mean()), rel_q10=float(np.quantile(rv, 0.1)), rel_ring=ring_mean,
                 contrast_ring=float(rv.mean()) - ring_mean,
                 rho=float(np.hypot(cx - DISK_CX, cy - DISK_CY) / DISK_R), abs_lat=float(abs(cy - DISK_CY) / DISK_R),
-                area=area,
+                area=area, cx=float(cx), cy=float(cy),
+                x_rel=float((cx - DISK_CX) / DISK_R), y_rel=float((cy - DISK_CY) / DISK_R),
+                log_width=float(np.log(2.0 * area / max(perim, 1.0))), year=year,
+                **{f"fam{j}_p_mean": float(f[y0:y1, x0:x1][m].mean()) / 255 for j, f in enumerate(fam_p)},
             ))
             index[i] = len(rows) - 1
             if gts:
@@ -168,8 +191,61 @@ def process_image(stem, maps_path, img_path, gt_paths=(), keep_labels=False):
         nodes["parent_level_gap"] = [0.0 if q < 0 else float(areas[q] != areas[v]) for v, q in enumerate(par)]
         nodes["img_n_cc50"], nodes["img_fg50"], nodes["img_rel_std"] = img_n_cc50, img_fg50, img_rel_std
         nodes["station"] = station
+        if fam_p:
+            fm = nodes[[f"fam{j}_p_mean" for j in range(len(fam_p))]].to_numpy()
+            nodes["fam_gap"] = fm.max(1) - fm.min(1)
+        nodes = pd.concat([nodes, _context(nodes)], axis=1)
     return dict(stem=stem, nodes=nodes, ious=np.array(ious, np.float32).reshape(len(nodes), len(gts)),
                 n_gt=n_gt, baseline=baseline, labels=labels)
+
+
+def _context(nd):
+    """Where a candidate sits in its tree (how long it survives rising thresholds, how it splits, its ancestors),
+    how it ranks among the candidates of its level, and what lies around it. Derived from the node table only."""
+    n = len(nd); par = nd.parent.to_numpy(); la = nd.log_area.to_numpy(); ar = np.exp(la)
+    pm = nd.p_mean.to_numpy(); lev = nd.level_idx.to_numpy()
+    ch = [[] for _ in range(n)]
+    for v in range(n):
+        if par[v] >= 0:
+            ch[par[v]].append(v)
+    top = lev.astype(float).copy(); ndesc = np.zeros(n); nleaf = np.zeros(n); chain = np.zeros(n)
+    ch_area = np.zeros(n); ch_pm = np.full(n, np.nan); big_child = np.zeros(n)
+    for v in range(n - 1, -1, -1):                        # children have larger indices than their parent
+        c = ch[v]
+        if c:
+            top[v] = max(top[w] for w in c); ndesc[v] = sum(ndesc[w] + 1 for w in c)
+            nleaf[v] = sum(max(nleaf[w], 1) for w in c)
+            ch_area[v] = sum(ar[w] for w in c) / ar[v]; ch_pm[v] = max(pm[w] for w in c)
+            big_child[v] = max(ar[w] for w in c) / ar[v]
+            chain[v] = chain[c[0]] + 1 if len(c) == 1 else 0
+    root = np.arange(n); depth = np.zeros(n); up_chain = np.zeros(n); sib_rank = np.ones(n)
+    for v in range(n):
+        q = par[v]
+        if q >= 0:
+            root[v] = root[q]; depth[v] = depth[q] + 1
+            up_chain[v] = up_chain[q] + 1 if len(ch[q]) == 1 else 0
+            sib_rank[v] = ar[v] / max(ar[w] for w in ch[q])
+    out = dict(top_level=top, span=top - lev, n_desc=ndesc, n_leaf=nleaf, chain=chain, up_chain=up_chain,
+               ch_area=ch_area, ch_pm=ch_pm, big_child=big_child,
+               par_log_area=np.where(par >= 0, la[np.maximum(par, 0)], np.nan),
+               par_pm=np.where(par >= 0, pm[np.maximum(par, 0)], np.nan),
+               root_log_area=la[root], root_ratio=ar / ar[root], depth=depth, sib_rank=sib_rank,
+               root_nleaf=nleaf[root], root_top=top[root])
+    for k in (1, 6, 11, 15):
+        out[f"img_n_l{k}"] = np.full(n, float((lev == k).sum()))
+    out["img_area_l6"] = np.full(n, float(ar[lev == 6].sum()))
+    rank_area = np.zeros(n); rank_pm = np.zeros(n)
+    nn = np.full(n, np.nan); n_near = np.zeros(n); area_near = np.zeros(n)
+    xy = nd[["cx", "cy"]].to_numpy()
+    for k in np.unique(lev):
+        m = np.nonzero(lev == k)[0]
+        rank_area[m] = (la[m].argsort().argsort() + 1) / len(m); rank_pm[m] = (pm[m].argsort().argsort() + 1) / len(m)
+        if len(m) > 1:
+            d = np.hypot(*(xy[m][:, None, :] - xy[m][None, :, :]).transpose(2, 0, 1)); np.fill_diagonal(d, np.inf)
+            nn[m] = np.log(d.min(1)); near = d < NEAR_PX
+            n_near[m] = near.sum(1); area_near[m] = (near * ar[m][None, :]).sum(1) / ar[m]
+    out.update(rank_area=rank_area, rank_pm=rank_pm, nn_dist=nn, n_near=n_near, area_near=area_near)
+    return pd.DataFrame(out, index=nd.index)
 
 
 # ------------------------------------------------------------------------------------------------- selection + metric
@@ -240,7 +316,7 @@ def cmd_bank(a):
     jobs = []
     for s in splits.stem:
         ids = images[images.file_name == s + ".jpeg"].id.tolist()
-        jobs.append((s, f"{a.maps}/{s}.npy", f"{RAW}/train/train_images/{s}.jpeg",
+        jobs.append((s, [f"{d}/{s}.npy" for d in a.maps], f"{RAW}/train/train_images/{s}.jpeg",
                      [f"{ROOT}/data/masks/inst/{i}.png" for i in ids]))
     fold_of = splits.set_index("stem").fold
     jobs = [j for j in jobs if fold_of[j[0]] in a.folds]
@@ -260,25 +336,29 @@ def cmd_bank(a):
     print(f"bank: {len(bank)} images, {n} candidates ({n / len(bank):.0f}/image), {time.time() - t0:.0f}s -> {a.out}")
 
 
-def _fit_scorer(X, Y, R_rows, seed=0):
-    """Hurdle scorer: h = P(record matches) on (candidate, record) rows; m = E[IoU | match] on matched rows."""
+N_BAGS = 4                                                # scorers averaged; each split sees a random half of the descriptors
+
+
+def _fit_scorer(X, Y, R_rows, feats):
+    """Hurdle scorer: h = P(record matches) on (candidate, record) rows; m = E[IoU | match] on matched rows.
+    N_BAGS pairs with different seeds are averaged (random descriptor subsets per split decorrelate them)."""
     from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-    cat = [FEATURES.index(c) for c in CATEGORICAL]
+    cat = [feats.index(c) for c in CATEGORICAL]
     kw = dict(max_iter=400, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=40, l2_regularization=1.0,
-              categorical_features=cat, early_stopping=False, random_state=seed)
-    Xr = X[R_rows]; Yr = Y
-    h = HistGradientBoostingClassifier(**kw).fit(Xr, (Yr > 0.5).astype(np.int8))
-    mm = Yr > 0.5
-    m = HistGradientBoostingRegressor(**kw).fit(Xr[mm], Yr[mm])
-    return dict(h=h, m=m)
+              max_features=0.5, categorical_features=cat, early_stopping=False)
+    Xr = X[R_rows]; Yr = Y; mm = Yr > 0.5
+    return dict(h=[HistGradientBoostingClassifier(random_state=b, **kw).fit(Xr, mm.astype(np.int8)) for b in range(N_BAGS)],
+                m=[HistGradientBoostingRegressor(random_state=b, **kw).fit(Xr[mm], Yr[mm]) for b in range(N_BAGS)])
 
 
 def _score(model, X):
-    return model["h"].predict_proba(X)[:, 1] * np.clip(model["m"].predict(X), 0.5, 1.0)
+    hs = model["h"] if isinstance(model["h"], list) else [model["h"]]      # first-generation scorers hold one pair
+    ms = model["m"] if isinstance(model["m"], list) else [model["m"]]
+    return np.mean([h.predict_proba(X)[:, 1] * np.clip(m.predict(X), 0.5, 1.0) for h, m in zip(hs, ms)], 0)
 
 
-def _design(bank):
-    X = np.concatenate([r["nodes"][FEATURES].to_numpy(np.float32) for r in bank if len(r["nodes"])])
+def _design(bank, feats):
+    X = np.concatenate([r["nodes"][feats].to_numpy(np.float32) for r in bank if len(r["nodes"])])
     rows, Y, offs, off = [], [], [], 0
     for r in bank:
         n = len(r["nodes"]); offs.append(off)
@@ -291,7 +371,8 @@ def _design(bank):
 def cmd_fit(a):
     bank = _load(a.bank)                                   # all images, including those without candidates
     allbank = bank
-    print(f"{len(bank)} images, {sum(len(r['nodes']) for r in bank)} candidates")
+    feats = feature_names(next(r["nodes"] for r in bank if len(r["nodes"])))
+    print(f"{len(bank)} images, {sum(len(r['nodes']) for r in bank)} candidates, {len(feats)} descriptors")
     # baselines
     base = pq_of([p for r in allbank for p in [(sum(b[0] for b in r["baseline"]), sum(b[1] for b in r["baseline"]),
                                                   sum(b[2] for b in r["baseline"]), sum(r["n_gt"]) - sum(b[1] for b in r["baseline"]))]])
@@ -315,12 +396,12 @@ def cmd_fit(a):
     scores = {}
     for k in sorted({r["fold"] for r in bank}):
         tr = [r for r in bank if r["fold"] != k]; te = [r for r in bank if r["fold"] == k]
-        X, rows, Y, _ = _design(tr)
-        t0 = time.time(); model = _fit_scorer(X, Y, rows)
+        X, rows, Y, _ = _design(tr, feats)
+        t0 = time.time(); model = _fit_scorer(X, Y, rows, feats)
         for r in te:
-            scores[r["stem"]] = _score(model, r["nodes"][FEATURES].to_numpy(np.float32)) if len(r["nodes"]) else np.zeros(0)
+            scores[r["stem"]] = _score(model, r["nodes"][feats].to_numpy(np.float32)) if len(r["nodes"]) else np.zeros(0)
         print(f"  fold {k}: scorer fitted on {len(rows)} rows in {time.time() - t0:.0f}s", flush=True)
-    _dump(scores, os.path.join(os.path.dirname(os.path.abspath(a.bank)), "oof_scores.pkl"))   # for report tables
+    _dump(scores, os.path.splitext(a.out)[0] + "_oof_scores.pkl")   # cross-fitted scores: report tables, stage-2 seeds
     res = []
     for tau in np.round(np.arange(0.12, 0.42, 0.02), 2):
         parts, perfold = [], {}
@@ -330,13 +411,17 @@ def cmd_fit(a):
         q = pq_of(parts)
         res.append(dict(tau=float(tau), pq=q[0], tp=q[1], fp=q[2], fn=q[3], **{f"f{k}": pq_of(v)[0] for k, v in perfold.items()}))
     res = pd.DataFrame(res); print(res.round(4).to_string(index=False))
-    best = res.loc[res.pq.idxmax()]
-    print(f"decision layer: pooled OOF PQ {best.pq:.4f} at tau {best.tau} (baseline {base[0]:.4f}, best fixed {fb[0]:.4f})")
+    # the curve is flat near its top and the arg-max jumps with noise: take the centre of the plateau (within 0.001)
+    top = res[res.pq >= res.pq.max() - 1e-3].tau
+    best = res.iloc[(res.tau - (top.min() + top.max()) / 2).abs().argmin()]
+    rate = float(np.mean([len(_choose(r, scores[r["stem"]], best.tau)) for r in bank]))
+    print(f"decision layer: pooled OOF PQ {best.pq:.4f} at tau {best.tau} (baseline {base[0]:.4f}, best fixed {fb[0]:.4f}), "
+          f"{rate:.2f} instances per image")
     # final scorer on all candidates
-    X, rows, Y, _ = _design(bank)
-    model = _fit_scorer(X, Y, rows)
+    X, rows, Y, _ = _design(bank, feats)
+    model = _fit_scorer(X, Y, rows, feats)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    _dump(dict(model=model, tau=float(best.tau), features=FEATURES, levels=LEVELS.tolist(),
+    _dump(dict(model=model, tau=float(best.tau), rate=rate, features=feats, levels=LEVELS.tolist(),
                min_node_area=MIN_NODE_AREA, oof=res.to_dict("records"), baseline=base[0], best_fixed=fb[:3]), a.out)
     print("saved", a.out)
 
@@ -345,9 +430,21 @@ _WORKER = {}
 
 
 def _test_init(model_path, tau=None):
+    from threadpoolctl import threadpool_limits
+    _WORKER["threads"] = threadpool_limits(limits=1)       # one thread per worker: the pool is the parallelism
     _WORKER["d"] = _load(model_path)                       # once per worker process
     if tau is not None:
         _WORKER["d"]["tau"] = float(tau)
+
+
+def _rate_job(args):
+    """First pass of --match_rate: the forest and its scores only."""
+    stem, maps_path, img_path = args
+    d = _WORKER["d"]
+    nd = process_image(stem, maps_path, img_path)["nodes"]
+    if not len(nd):
+        return np.zeros(0, np.int64), np.zeros(0)
+    return nd.parent.to_numpy(), _score(d["model"], nd[d["features"]].to_numpy(np.float32))
 
 
 def _test_job(args):
@@ -357,7 +454,7 @@ def _test_job(args):
     nd = r["nodes"]
     if not len(nd):
         return stem, []
-    u = _score(d["model"], nd[FEATURES].to_numpy(np.float32))
+    u = _score(d["model"], nd[d["features"]].to_numpy(np.float32))   # the scorer carries its own descriptor list
     ch = select(nd.parent.to_numpy(), u - d["tau"])
     out = []
     for v in ch:
@@ -370,9 +467,23 @@ def _test_job(args):
 def cmd_predict(a):
     import glob
     paths = sorted(glob.glob(f"{RAW}/test/test_images/*.jpeg"))
-    jobs = [(os.path.basename(p)[:-5], f"{a.maps}/{os.path.basename(p)[:-5]}.npy", p) for p in paths]
+    jobs = [(os.path.basename(p)[:-5], [f"{d}/{os.path.basename(p)[:-5]}.npy" for d in a.maps], p) for p in paths]
     rows = []
-    with Pool(a.workers, initializer=_test_init, initargs=(a.model, a.tau)) as pool:
+    tau = a.tau
+    if a.match_rate:
+        # The scorer is fitted on single-model out-of-fold maps; averaged test maps are smoother and it then keeps
+        # fewer instances at the same tau. Pick the tau that restores the cross-validated instances per image.
+        target = _load(a.model)["rate"]
+        with Pool(a.workers, initializer=_test_init, initargs=(a.model, None)) as pool:
+            forests = pool.map(_rate_job, jobs)
+        count = lambda t: np.mean([len(select(par, u - t)) if len(u) else 0 for par, u in forests])  # noqa: E731
+        lo, hi = 0.02, 0.60
+        for _ in range(20):                               # the count decreases with tau
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if count(mid) > target else (lo, mid)
+        tau = round((lo + hi) / 2, 4)
+        print(f"match_rate: tau {tau} gives {count(tau):.2f} instances per image (cross-validated rate {target:.2f})")
+    with Pool(a.workers, initializer=_test_init, initargs=(a.model, tau)) as pool:
         for stem, rles in pool.imap(_test_job, jobs):
             rows += [{"filament_id": f"{stem}_{k}", "segmentation_rle": r} for k, r in enumerate(rles, 1)]
     pd.DataFrame(rows, columns=["filament_id", "segmentation_rle"]).to_csv(a.out, index=False)
@@ -382,13 +493,18 @@ def cmd_predict(a):
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    b = sub.add_parser("bank"); b.add_argument("--maps", required=True); b.add_argument("--out", required=True)
+    maps_help = "one directory of cached maps per model family; keep the same order for bank and predict"
+    b = sub.add_parser("bank"); b.add_argument("--maps", required=True, nargs="+", help=maps_help)
+    b.add_argument("--out", required=True)
     b.add_argument("--workers", type=int, default=6); b.add_argument("--limit", type=int, default=0)
     b.add_argument("--folds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     f = sub.add_parser("fit"); f.add_argument("--bank", required=True); f.add_argument("--out", required=True)
-    p = sub.add_parser("predict"); p.add_argument("--maps", required=True); p.add_argument("--model", required=True)
+    p = sub.add_parser("predict"); p.add_argument("--maps", required=True, nargs="+", help=maps_help)
+    p.add_argument("--model", required=True)
     p.add_argument("--out", required=True); p.add_argument("--workers", type=int, default=4)
     p.add_argument("--tau", type=float, default=None, help="override the selection threshold stored with the scorer")
+    p.add_argument("--match_rate", action="store_true",
+                   help="choose tau so that the instances per image equal the cross-validated rate stored with the scorer")
     a = ap.parse_args()
     dict(bank=cmd_bank, fit=cmd_fit, predict=cmd_predict)[a.cmd](a)
 

@@ -8,78 +8,113 @@ The method and results are described in `report/main.tex` (organizers' template)
 
 ## Method in one paragraph
 
-A U-Net (ImageNet-pretrained EfficientNet-B3 encoder, one grayscale input channel) predicts three maps at native
-2048x2048 resolution: the filament probability, a normalised distance-to-boundary map and the contact line between
-touching filaments. Supervision uses *consensus* targets: the fraction of the 1-3 annotators of an image who marked
-each pixel. Five models, one per date-grouped fold, are averaged with flip test-time augmentation. The averaged map is
-turned into instances by a **decision layer**: thresholding at 16 levels gives a nested forest of candidate
-components; a gradient-boosted hurdle model predicts each candidate's expected matched IoU against a random annotator
-(u = P(match) x E[IoU | match]); an exact dynamic programme selects the pixel-disjoint set of candidates that
-maximises sum(u - tau), which maximises the host's pooled Panoptic Quality (Dinkelbach). Each selected component is one
-COCO RLE row of the submission.
+U-Nets (ImageNet-pretrained EfficientNetV2-S and EfficientNet-B3 encoders, one grayscale input channel) predict three
+maps at native 2048x2048 resolution: the filament probability, a normalised distance-to-boundary map and the contact
+line between touching filaments. Supervision uses *consensus* targets: the fraction of the 1-3 annotators of an image
+who marked each pixel. Ten models (two encoders x five date-grouped folds) are averaged over eight flip/rotation
+views. The averaged map is turned into instances in two learned stages. **Stage 1, the decision layer:** thresholding
+at 16 levels gives a nested forest of candidate components; a gradient-boosted hurdle model predicts each candidate's
+expected matched IoU against a random annotator (u = P(match) x E[IoU | match]) from 69 descriptors; an exact dynamic
+programme selects the pixel-disjoint set of candidates that maximises sum(u - tau), which maximises the host's pooled
+Panoptic Quality (Dinkelbach). **Stage 2, the refiner:** a UNet++ re-segments every selected instance from a
+native-resolution window (image, probability, the instance, the other selected instances) and predicts the outline an
+annotator would draw given that they drew this filament. Each refined instance is one COCO RLE row of the submission.
 
-| (out-of-fold, all 707 training images) | pooled PQ |
-|---|---|
-| plain rule: components of p > 0.6, area >= 400 | 0.405 |
-| decision layer, tau = 0.26 | **0.431** (gain on every fold) |
-| public leaderboard: plain rule / decision layer | 0.35 / **0.37** |
+| pipeline (out-of-fold, all 707 training images) | pooled PQ | public LB |
+|---|---|---|
+| EfficientNet-B3, flip TTA, plain rule (components of p > 0.6, area >= 400) | 0.405 | 0.35 |
+| + decision layer, 35 descriptors | 0.431 | 0.37 |
+| + 8-view TTA, tree-context descriptors | 0.439 | 0.38 |
+| + four averaged scorers | 0.441 | |
+| + EfficientNetV2-S family | 0.442 | |
+| + instance refiner (final) | **0.448** | **0.39** |
 
-**Credit.** The decision layer (pooled-PQ reduction, component tree, hurdle scorer, tree DP, tau = PQ*/2) follows the
-public Kaggle notebook *"Deciding under disagreement - a PQ-optimal detect-then-refine cascade for solar filaments
-(filseg v4)"* by _.tushhaaarrrr
-(https://www.kaggle.com/code/tushhaaarrrr/solar-filament-segmentation-2026-0-40). It was re-implemented here from the
-description, on our own maps, descriptors and scorer; no code, weights or predictions were copied.
+For scale: one annotator scored against another on the 296 multi-annotated training images gets a pooled PQ of 0.340.
+Every stage is cross-fitted with the same folds, so the numbers are out-of-fold end to end.
+
+**Credit.** The decision layer (pooled-PQ reduction, component tree, hurdle scorer, tree DP, tau = PQ*/2) and the idea
+of an instance refiner follow the public Kaggle notebook *"Deciding under disagreement - a PQ-optimal detect-then-refine
+cascade for solar filaments (filseg v4)"* by _.tushhaaarrrr
+(https://www.kaggle.com/code/tushhaaarrrr/solar-filament-segmentation-2026-0-40). Both were re-implemented here from
+the description, on our own maps, descriptors, scorer and refiner design; no code, weights or predictions were copied.
 
 ## Layout
 
 | path | purpose |
 |---|---|
 | `src/prepare.py` | rasterise COCO polygons to instance maps, build consensus targets, make date-grouped folds |
-| `src/common.py` | model definition, instance extraction (components / contact-line split / watershed), PQ metric, RLE |
-| `src/train.py` | training loop (BCE + Dice + distance MSE + weighted contact BCE), full-frame validation |
-| `src/tune.py` | grid search of post-processing parameters on validation PQ |
-| `src/evaluate.py` | single-model and ensemble evaluation with standard errors and bootstrap intervals |
-| `src/predict.py` | test-set inference and ensembling with the plain rule (also provides model loading) |
-| `src/predict_maps.py` | caches out-of-fold maps (per fold model) and 5-fold mean test maps |
-| `src/decision.py` | decision layer: candidate bank, cross-fitted scorer, exact tree selection, final submission |
-| `src/rethreshold.py` | re-runs the plain rule on cached probability maps |
+| `src/common.py` | model definition, input standardisation, plain instance extraction, PQ metric, RLE |
+| `src/train.py` | dense-model training loop, full-frame prediction with test-time augmentation |
+| `src/predict_maps.py` | caches out-of-fold maps (per fold model) and fold-mean test maps |
+| `src/decision.py` | stage 1: candidate bank, cross-fitted scorer, exact tree selection |
+| `src/refine.py` | stage 2: training seeds, refiner training, out-of-fold evaluation, test refinement |
 | `src/check_submission.py` | validates a CSV: RLE decodability, unique ids, no overlapping masks |
 | `src/export_weights.py` | writes compact half-precision checkpoints into `weights/` |
+| `src/predict.py`, `src/tune.py`, `src/evaluate.py`, `src/rethreshold.py` | the plain-rule baseline and its evaluation (model loading lives in `predict.py`) |
+| `scripts/predict_test.sh` | the whole inference chain, weights -> submission CSV |
 | `scripts/train_folds.sh` | trains one encoder on several folds sequentially |
-| `scripts/make_*_figures.py`, `scripts/make_*_table.py` | figures and tables for the report |
-| `notebooks/pipeline.ipynb` | end-to-end illustration: data, model, validation, submission |
-| `report/` | 4-page technical report (LaTeX, organizers' acmart template) |
+| `scripts/make_*_figure*.py`, `scripts/make_decision_table.py` | figures and tables for the report |
+| `notebooks/pipeline.ipynb` | end-to-end illustration: data, dense maps, both stages, submission |
+| `report/` | technical report (LaTeX, organizers' acmart template) and the submitted CSV |
 
 ## Reproduce the submission
 
 ```bash
 pip install -r requirements.txt
 # download and unzip the Kaggle data into data/raw/MAGFiLO_1.0_Kaggle_2026 (train/ and test/)
-python src/predict_maps.py test --weights weights/effb3d_f*.pt --out runs/maps/test_effb3d     # ~5 s/image on GPU
-python src/decision.py predict --maps runs/maps/test_effb3d --model weights/decision_scorer.pkl --tau 0.26 --out submission.csv
-python src/check_submission.py submission.csv
+scripts/predict_test.sh submission.csv        # GPU, about 50 minutes on a laptop RTX 5060
 ```
-`weights/params.json` records these settings. The submitted file is `report/submission_final.csv`.
+The script caches the dense maps of both encoder families (8 views x 5 fold models each), runs the decision layer with
+`--match_rate`, refines the selected instances and validates the CSV. `weights/params.json` records the settings. The
+submitted file is `report/submission_final.csv`. GPU arithmetic is not bit-reproducible across hardware: maps can
+differ by one 8-bit level, which may move a few borderline instances.
+
+`--match_rate`: the scorer is fitted on out-of-fold maps, where every image is predicted by one model per family; test
+maps average five and are smoother, so the same tau keeps fewer instances. The option sets tau, without labels, to the
+value that restores the cross-validated number of instances per image stored with the scorer.
 
 ## Train from scratch
 
 ```bash
 python src/prepare.py
-scripts/train_folds.sh efficientnet-b3 effb3d "0 1 2 3 4" --epochs 50 --crop 640 --bs 6 --eval_every 10
-for k in 0 1 2 3 4; do python src/export_weights.py runs/effb3d_f$k weights/effb3d_f$k.pt; done
-python src/predict_maps.py oof --weights weights/effb3d_f*.pt --out runs/maps/oof_effb3d          # out-of-fold maps
-python src/decision.py bank --maps runs/maps/oof_effb3d --out runs/decision/bank_effb3d.pkl     # ~5 min, 6 CPU workers
-python src/decision.py fit --bank runs/decision/bank_effb3d.pkl --out weights/decision_scorer.pkl  # cross-fit + tau curve
-python scripts/make_decision_table.py 0.26 && python scripts/make_report_figures.py 0.26
+scripts/train_folds.sh efficientnet-b3 effb3d "0 1 2 3 4" --epochs 50 --crop 640 --bs 6 --eval_every 10 --norm fixed
+scripts/train_folds.sh tu-tf_efficientnetv2_s effv2s "0 1 2 3 4" --epochs 75 --crop 512 --bs 16 --eval_every 25 --norm disk
+for k in 0 1 2 3 4; do
+  python src/export_weights.py runs/effb3d_f$k weights/effb3d_f$k.pt
+  python src/export_weights.py runs/effv2s_f$k weights/effv2s_f$k.pt --ckpt last.pt
+done
+for f in effv2s effb3d; do python src/predict_maps.py oof --weights weights/${f}_f*.pt --out runs/maps/oof_$f --tta 8; done
+# stage 1 (CPU): candidate bank ~6 min, cross-fit + tau curve ~10 min
+python src/decision.py bank --maps runs/maps/oof_effv2s runs/maps/oof_effb3d --out runs/decision/bank_v2s_b3.pkl
+python src/decision.py fit --bank runs/decision/bank_v2s_b3.pkl --out runs/decision/scorer_v2s_b3.pkl
+cp runs/decision/scorer_v2s_b3.pkl weights/decision_scorer.pkl
+# stage 2 (GPU): seeds from the out-of-fold selections, one refiner per fold, out-of-fold evaluation
+python src/refine.py seeds --maps runs/maps/oof_effv2s runs/maps/oof_effb3d \
+    --scores runs/decision/scorer_v2s_b3_oof_scores.pkl --scorer runs/decision/scorer_v2s_b3.pkl --out runs/refine/v2s_b3
+for k in 0 1 2 3 4; do python src/refine.py train --seeds runs/refine/v2s_b3 --fold $k --arch UnetPlusPlus --out weights/refiner_f$k.pt; done
+python src/refine.py eval --seeds runs/refine/v2s_b3 --weights weights/refiner_f*.pt --json runs/refine/v2s_b3/eval.json
+python scripts/make_decision_table.py && python scripts/make_report_figures.py && python scripts/make_pipeline_figure.py
 ```
-`fit` prints the cross-fitted pooled PQ for tau in 0.12-0.40; the plateau is 0.26-0.32. tau = 0.26 was submitted
-because the 5-fold mean test maps are slightly less confident than single-model out-of-fold maps, and 0.26 restores
-the out-of-fold selection rate (6.3 vs 6.4 filaments per image). The ResNet34 comparison models (`resnet34d`) are
-trained the same way with `--epochs 40 --eval_every 5` and evaluated with `src/evaluate.py` / `scripts/cv_evaluate.sh`.
+The map directories are always given in the same order (EfficientNetV2-S first): the scorer's per-family descriptors
+depend on it. `fit` prints the cross-fitted pooled PQ for tau in 0.12-0.40 and stores the centre of the plateau.
+
+## What was tried and left out
+
+- Distance-map watershed and contact-line cuts for touching filaments: never better than connected components.
+- More dense models: the second encoder family lifts the ceiling of the candidate trees (oracle selection 0.559 ->
+  0.568) but the realised score by about 0.001.
+- Candidates that group fragments at a low threshold while keeping the shape of a higher one: no oracle headroom.
+- A CNN scoring each candidate from its image window as extra descriptors: +0.0004 +- 0.0015 when regularised; an
+  over-trained version gains 0.003, but only on images within three days of a training image (it memorises how the same
+  filament was labelled on a neighbouring day), so it is not part of the method.
+- A plain U-Net as refiner and averaging two refiners: trained on an earlier selection, UNet++ scored 0.449, U-Net
+  0.446 and their average 0.448. The UNet++ retrained on the final selection scores 0.448, so these gaps are within
+  run-to-run variation; the retrained UNet++ is the one in `weights/`.
 
 ## Data notes
 
 707 training images, 1154 annotation sets (296 images annotated by 2-3 annotators), 8199 filaments,
 median filament area 1228 px; only 0.9 % of filaments touch another filament within 3 px. Images are
-2048x2048 8-bit grayscale JPEGs; file names encode time and observatory. Only the competition data is
+2048x2048 8-bit grayscale JPEGs; file names encode time and observatory. Polygons are rasterised with
+pycocotools, which reproduces the `area` field of the annotation file exactly. Only the competition data is
 used for training; the public MAGFiLO release overlaps the test set and is deliberately not used.

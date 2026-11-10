@@ -8,12 +8,12 @@ Validation is run on full 2048x2048 images and reports Dice plus Panoptic Qualit
 import argparse, os, time, json, glob
 import numpy as np, pandas as pd, cv2, torch, torch.nn as nn, torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from common import ROOT, RAW, load_image, normalize, build_model, masks_to_instances, panoptic_quality
+from common import ROOT, RAW, load_image, normalize, norm_stats, build_model, masks_to_instances, panoptic_quality
 
 
 class CropDataset(Dataset):
-    def __init__(self, stems, crop=512, per_image=4, fg_prob=0.7):
-        self.stems, self.crop, self.per_image, self.fg_prob = stems, crop, per_image, fg_prob
+    def __init__(self, stems, crop=512, per_image=4, fg_prob=0.7, norm="fixed"):
+        self.stems, self.crop, self.per_image, self.fg_prob, self.norm = stems, crop, per_image, fg_prob, norm
 
     def __len__(self):
         return len(self.stems) * self.per_image
@@ -28,6 +28,7 @@ class CropDataset(Dataset):
 
     def __getitem__(self, i):
         img, soft, ys, xs = self.load(self.stems[i % len(self.stems)])
+        stats = norm_stats(img, self.norm)                 # from the whole, un-augmented image
         c = self.crop
         if len(ys) and np.random.rand() < self.fg_prob:
             j = np.random.randint(len(ys))
@@ -44,7 +45,7 @@ class CropDataset(Dataset):
         x = np.clip(x, 0, 1) ** np.exp(np.random.uniform(-0.3, 0.3))
         x = x * np.random.uniform(0.85, 1.15) + np.random.uniform(-0.05, 0.05)
         x = x + np.random.normal(0, np.random.uniform(0, 0.02), x.shape).astype(np.float32)
-        x = normalize(np.ascontiguousarray(x, dtype=np.float32)); y = np.ascontiguousarray(y, dtype=np.float32)
+        x = normalize(np.ascontiguousarray(x, dtype=np.float32), stats); y = np.ascontiguousarray(y, dtype=np.float32)
         return torch.from_numpy(x)[None], torch.from_numpy(y)
 
 
@@ -55,18 +56,27 @@ def soft_dice_loss(logits, target, eps=1.0):
     return (1 - num / den).mean()
 
 
+def tta_views(tta):
+    """Test-time views as (rot90 k, flip dims): 1 view, the 4 flips (tta=True or 4) or the full dihedral group (8)."""
+    n = 4 if tta is True else int(tta or 1)
+    flips = [(), (-1,), (-2,), (-1, -2)]
+    return [(k, f) for k in ((0, 1) if n >= 8 else (0,)) for f in (flips if n >= 4 else flips[:1])]
+
+
 @torch.no_grad()
 def predict_full(model, img, device, tta=False):
-    """Returns float32 array (3, H, W): [0] filament probability, [1] normalised distance map, [2] contact line."""
-    x = torch.from_numpy(normalize(img))[None, None].to(device)
+    """Returns float32 array (3, H, W): [0] filament probability, [1] normalised distance map, [2] contact line.
+    The image is standardised the way the model was trained (model.norm, "fixed" if the attribute is missing)."""
+    x = torch.from_numpy(normalize(img, norm_stats(img, getattr(model, "norm", "fixed"))))[None, None].to(device)
+    views = tta_views(tta)
+    p = 0
     with torch.autocast("cuda", dtype=torch.float16):
-        p = torch.sigmoid(model(x))
-        if tta:
-            p = p + torch.sigmoid(model(x.flip(-1))).flip(-1)
-            p = p + torch.sigmoid(model(x.flip(-2))).flip(-2)
-            p = p + torch.sigmoid(model(x.flip(-1, -2))).flip(-1, -2)
-            p = p / 4
-    return p[0].float().cpu().numpy()
+        for k, f in views:
+            z = torch.rot90(x, k, (-2, -1)) if k else x
+            q = torch.sigmoid(model(z.flip(f) if f else z)).float()
+            q = q.flip(f) if f else q
+            p = p + (torch.rot90(q, -k, (-2, -1)) if k else q)
+    return (p / len(views))[0].cpu().numpy()
 
 
 def evaluate(model, stems, device, images_df, thr=0.5, min_area=150, tta=False):
@@ -97,6 +107,7 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--eval_every", type=int, default=5)
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--norm", choices=["fixed", "disk"], default="disk", help="input standardisation, see common.norm_stats")
     args = ap.parse_args()
     out = args.out or f"{ROOT}/runs/{args.encoder}_f{args.fold}"
     os.makedirs(out, exist_ok=True)
@@ -107,9 +118,10 @@ def main():
     images_df = pd.DataFrame(json.load(open(f"{RAW}/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json"))["images"])
     tr = splits[splits.fold != args.fold].stem.tolist(); va = splits[splits.fold == args.fold].stem.tolist()
     print(f"train files {len(tr)}, val files {len(va)}")
-    ds = CropDataset(tr, args.crop, args.per_image)
+    ds = CropDataset(tr, args.crop, args.per_image, norm=args.norm)
     dl = DataLoader(ds, batch_size=args.bs, shuffle=True, num_workers=args.workers, drop_last=True, persistent_workers=True)
-    model = build_model(args.encoder).to(device)
+    model = build_model(args.encoder).to(device).to(memory_format=torch.channels_last)
+    model.norm = args.norm
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     steps = args.epochs * len(dl)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=steps, pct_start=0.05)
@@ -120,7 +132,7 @@ def main():
     for ep in range(args.epochs):
         model.train(); t0 = time.time(); tot = 0
         for x, y in dl:
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            x = x.to(device, non_blocking=True).contiguous(memory_format=torch.channels_last); y = y.to(device, non_blocking=True)
             with torch.autocast("cuda", dtype=torch.float16):
                 pred = model(x)
                 seg, dist, touch = pred[:, :1].float(), pred[:, 1:2].float(), pred[:, 2:].float()

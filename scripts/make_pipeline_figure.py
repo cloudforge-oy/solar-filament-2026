@@ -16,22 +16,23 @@ ax.text(0.05, 2.95, "Training", fontsize=9, weight="bold", va="top"); ax.text(0.
 tr = ["#dbe9f6", "#dbe9f6", "#e3f1dc", "#e3f1dc", "#fbe7c6"]
 tx = ["COCO polygons\n(1–3 annotator sets\nper image)", "Rasterise to\ninstance maps\n2048×2048",
       "Consensus targets:\nsoft mask, distance,\ncontact line", "Random native-res\ncrops + flips/rot90\n+ photometric jitter",
-      "U-Net (ResNet34 /\nEffNet-B3 encoder)\nBCE+Dice+MSE+BCE"]
+      "U-Nets: EffNetV2-S and\nEffNet-B3 encoders,\n5 folds each"]
 xs = [0.1, 2.1, 4.1, 6.1, 8.1]
 for x, t, c in zip(xs, tx, tr):
     box(ax, x, 1.75, 1.75, 1.0, t, c)
 for a, b in zip(xs[:-1], xs[1:]):
     arrow(ax, a + 1.75, 2.25, b, 2.25)
-inf = ["H-α test image\n2048×2048\ngrayscale", "Full-frame forward\n+ flip TTA,\n5-fold average",
-       "Component tree:\n16 threshold levels,\nclosing + hole fill", "GBM scorer û = ĥ·m̂,\nexact tree DP\nmax Σ(û − τ)",
-       "COCO RLE per\nselected node →\nsubmission.csv"]
-ic = ["#dbe9f6", "#fbe7c6", "#f6d8d8", "#f6d8d8", "#e8e8e8"]
+inf = ["H-α test image\n2048×2048: full frame,\n8 views × 10 models", "Component tree:\n16 threshold levels,\nclosing + hole fill",
+       "GBM scorer û = ĥ·m̂\n(69 descriptors),\nexact tree DP", "Stage 2: UNet++ refiner\nre-segments each\nselected instance",
+       "Pixel-disjoint\nCOCO RLE →\nsubmission.csv"]
+ic = ["#fbe7c6", "#f6d8d8", "#f6d8d8", "#e6dcf2", "#e8e8e8"]
 for x, t, c in zip(xs, inf, ic):
     box(ax, x, 0.15, 1.75, 1.0, t, c)
 for a, b in zip(xs[:-1], xs[1:]):
     arrow(ax, a + 1.75, 0.65, b, 0.65)
-arrow(ax, 8.95, 1.75, 2.95, 1.15)  # trained weights to inference
-ax.text(6.0, 1.47, "trained weights", fontsize=7, ha="center", style="italic")
+arrow(ax, 8.95, 1.75, 0.98, 1.15)  # trained weights to inference
+ax.text(5.0, 1.47, "trained weights; out-of-fold maps train the scorer and the refiner", fontsize=7, ha="center", style="italic",
+        bbox=dict(fc="white", ec="none", pad=1.5))
 out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "report", "figures", "pipeline.pdf")
 os.makedirs(os.path.dirname(out), exist_ok=True)
 fig.savefig(out, bbox_inches="tight"); print("saved", os.path.relpath(out))
