@@ -23,7 +23,7 @@ for x, t, c in zip(xs, tx, tr):
 for a, b in zip(xs[:-1], xs[1:]):
     arrow(ax, a + 1.75, 2.25, b, 2.25)
 inf = ["H-α test image\n2048×2048: full frame,\n8 views × 10 models", "Component tree:\n16 threshold levels,\nclosing + hole fill",
-       "GBM scorer û = ĥ·m̂\n(69 descriptors),\nexact tree DP", "Stage 2: UNet++ refiner\nre-segments each\nselected instance",
+       "GBM scorer û = ĥ·m̂\n(67 descriptors),\nexact tree DP", "Stage 2: UNet++ refiner\nre-segments each\nselected instance",
        "Pixel-disjoint\nCOCO RLE →\nsubmission.csv"]
 ic = ["#fbe7c6", "#f6d8d8", "#f6d8d8", "#e6dcf2", "#e8e8e8"]
 for x, t, c in zip(xs, inf, ic):

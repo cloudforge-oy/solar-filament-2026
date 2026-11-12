@@ -14,7 +14,7 @@ line between touching filaments. Supervision uses *consensus* targets: the fract
 who marked each pixel. Ten models (two encoders x five date-grouped folds) are averaged over eight flip/rotation
 views. The averaged map is turned into instances in two learned stages. **Stage 1, the decision layer:** thresholding
 at 16 levels gives a nested forest of candidate components; a gradient-boosted hurdle model predicts each candidate's
-expected matched IoU against a random annotator (u = P(match) x E[IoU | match]) from 69 descriptors; an exact dynamic
+expected matched IoU against a random annotator (u = P(match) x E[IoU | match]) from 67 descriptors computed from the image and the predicted maps only (nothing from the file name); an exact dynamic
 programme selects the pixel-disjoint set of candidates that maximises sum(u - tau), which maximises the host's pooled
 Panoptic Quality (Dinkelbach). **Stage 2, the refiner:** a UNet++ re-segments every selected instance from a
 native-resolution window (image, probability, the instance, the other selected instances) and predicts the outline an
@@ -27,7 +27,8 @@ annotator would draw given that they drew this filament. Each refined instance i
 | + 8-view TTA, tree-context descriptors | 0.439 | 0.38 |
 | + four averaged scorers | 0.441 | |
 | + EfficientNetV2-S family | 0.442 | |
-| + instance refiner (final) | **0.448** | **0.39** |
+| - file-name descriptors (site, year), not allowed at inference | 0.440 | |
+| + instance refiner (final) | **0.447** | **0.39** |
 
 For scale: one annotator scored against another on the 296 multi-annotated training images gets a pooled PQ of 0.340.
 Every stage is cross-fitted with the same folds, so the numbers are out-of-fold end to end.
@@ -108,8 +109,9 @@ depend on it. `fit` prints the cross-fitted pooled PQ for tau in 0.12-0.40 and s
   over-trained version gains 0.003, but only on images within three days of a training image (it memorises how the same
   filament was labelled on a neighbouring day), so it is not part of the method.
 - A plain U-Net as refiner and averaging two refiners: trained on an earlier selection, UNet++ scored 0.449, U-Net
-  0.446 and their average 0.448. The UNet++ retrained on the final selection scores 0.448, so these gaps are within
-  run-to-run variation; the retrained UNet++ is the one in `weights/`.
+  0.446 and their average 0.448; a retrained UNet++ scored 0.448, so these gaps are within run-to-run variation.
+  The refiner in `weights/` was trained on the selections of the scorer that still had the two file-name descriptors;
+  the refiner itself never sees file-name information, and it is evaluated out-of-fold on the final selections.
 
 ## Data notes
 

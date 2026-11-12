@@ -33,7 +33,6 @@ MIN_NODE_AREA = 100                                       # candidates below thi
 CLOSE_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 RING_KERNEL = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 DISK_CX, DISK_CY, DISK_R = 1023.5, 1024.0, 900.0          # GONG frames have a fixed disk geometry
-STATIONS = ["Bh", "Ch", "Lh", "Mh", "Th", "Uh"]
 PAD = 10
 FEATURES = [
     "level", "log_area", "log_bbox_w", "log_bbox_h", "log_long", "log_short", "elong", "solidity", "fill",
@@ -41,17 +40,18 @@ FEATURES = [
     "dist_max", "dist_mean", "touch_max", "touch_mean",
     "rel_mean", "rel_q10", "rel_ring", "contrast_ring",
     "rho", "abs_lat", "n_children", "area_ratio_parent", "n_siblings", "parent_level_gap",
-    "img_n_cc50", "img_fg50", "img_rel_std", "station",
+    "img_n_cc50", "img_fg50", "img_rel_std",
 ]
 # second generation: more geometry, the position of a candidate in its tree, and its neighbourhood
 FEATURES += [
-    "x_rel", "y_rel", "log_width", "year",
+    "x_rel", "y_rel", "log_width",
     "top_level", "span", "n_desc", "n_leaf", "chain", "up_chain", "ch_area", "ch_pm", "big_child",
     "par_log_area", "par_pm", "root_log_area", "root_ratio", "depth", "sib_rank", "root_nleaf", "root_top",
     "img_n_l1", "img_n_l6", "img_n_l11", "img_n_l15", "img_area_l6", "rank_area", "rank_pm",
     "nn_dist", "n_near", "area_near",
 ]
-CATEGORICAL = ["station"]
+# Every descriptor is computed from the image and the predicted maps. The file name (observation time, site) is
+# not used: the hosts allow no observation metadata at inference.
 NEAR_PX = 200.0                                           # neighbourhood radius for the same-level context features
 
 
@@ -100,7 +100,6 @@ def process_image(stem, maps_path, img_path, gt_paths=(), keep_labels=False):
     p = maps[0].astype(np.float32) / 255
     dist, touch = maps[1], maps[2]
     fam_p = [f[0] for f in fams] if len(fams) > 1 else []
-    year = float(stem[:4]) + (float(stem[4:6]) - 0.5) / 12 if stem[:6].isdigit() else np.nan
     img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE).astype(np.float32)
     bg = cv2.GaussianBlur(img, (0, 0), 40)
     rel = img / np.maximum(bg, 1.0)                         # relative intensity; filaments are < 1
@@ -108,7 +107,6 @@ def process_image(stem, maps_path, img_path, gt_paths=(), keep_labels=False):
     disk = (xx - DISK_CX) ** 2 + (yy - DISK_CY) ** 2 < (0.98 * DISK_R) ** 2
     gts = [cv2.imread(g, cv2.IMREAD_UNCHANGED).astype(np.int64) for g in gt_paths]
     n_gt = [int(g.max()) for g in gts]
-    station = float(STATIONS.index(stem[-2:])) if stem[-2:] in STATIONS else np.nan   # NaN = unknown category
 
     # baseline: the rule of our earlier submissions
     n, lab, st, _ = cv2.connectedComponentsWithStats((p > 0.6).astype(np.uint8), connectivity=8)
@@ -172,7 +170,7 @@ def process_image(stem, maps_path, img_path, gt_paths=(), keep_labels=False):
                 rho=float(np.hypot(cx - DISK_CX, cy - DISK_CY) / DISK_R), abs_lat=float(abs(cy - DISK_CY) / DISK_R),
                 area=area, cx=float(cx), cy=float(cy),
                 x_rel=float((cx - DISK_CX) / DISK_R), y_rel=float((cy - DISK_CY) / DISK_R),
-                log_width=float(np.log(2.0 * area / max(perim, 1.0))), year=year,
+                log_width=float(np.log(2.0 * area / max(perim, 1.0))),
                 **{f"fam{j}_p_mean": float(f[y0:y1, x0:x1][m].mean()) / 255 for j, f in enumerate(fam_p)},
             ))
             index[i] = len(rows) - 1
@@ -190,7 +188,6 @@ def process_image(stem, maps_path, img_path, gt_paths=(), keep_labels=False):
         nodes["area_ratio_parent"] = [areas[v] / areas[q] if q >= 0 else 1.0 for v, q in enumerate(par)]
         nodes["parent_level_gap"] = [0.0 if q < 0 else float(areas[q] != areas[v]) for v, q in enumerate(par)]
         nodes["img_n_cc50"], nodes["img_fg50"], nodes["img_rel_std"] = img_n_cc50, img_fg50, img_rel_std
-        nodes["station"] = station
         if fam_p:
             fm = nodes[[f"fam{j}_p_mean" for j in range(len(fam_p))]].to_numpy()
             nodes["fam_gap"] = fm.max(1) - fm.min(1)
@@ -343,9 +340,8 @@ def _fit_scorer(X, Y, R_rows, feats):
     """Hurdle scorer: h = P(record matches) on (candidate, record) rows; m = E[IoU | match] on matched rows.
     N_BAGS pairs with different seeds are averaged (random descriptor subsets per split decorrelate them)."""
     from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-    cat = [feats.index(c) for c in CATEGORICAL]
     kw = dict(max_iter=400, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=40, l2_regularization=1.0,
-              max_features=0.5, categorical_features=cat, early_stopping=False)
+              max_features=0.5, early_stopping=False)
     Xr = X[R_rows]; Yr = Y; mm = Yr > 0.5
     return dict(h=[HistGradientBoostingClassifier(random_state=b, **kw).fit(Xr, mm.astype(np.int8)) for b in range(N_BAGS)],
                 m=[HistGradientBoostingRegressor(random_state=b, **kw).fit(Xr[mm], Yr[mm]) for b in range(N_BAGS)])
